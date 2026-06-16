@@ -1,0 +1,7 @@
+services:
+  meshcore-matrix-bridge:
+    build: .
+    container_name: meshcore-matrix-bridge
+    restart: unless-stopped
+    env_file:
+      - .env
