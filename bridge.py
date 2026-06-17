@@ -1,28 +1,31 @@
 import asyncio
 import os
+import re
+import html as html_lib
 from meshcore import MeshCore, EventType
 from nio import (
     AsyncClient, LoginResponse,
     RoomResolveAliasResponse, RoomMessageText,
 )
+from dotenv import load_dotenv
+load_dotenv()
+
+sent_messages = {}  # event_id -> mesh_name
 
 # === CONFIG ===
 MATRIX_HOMESERVER = os.environ.get("MATRIX_HOMESERVER")
 MATRIX_BOT_USER   = os.environ["MATRIX_BOT_USER"]
 MATRIX_PASSWORD   = os.environ["MATRIX_PASSWORD"]
 MATRIX_ROOM_ALIAS = os.environ.get("MATRIX_ROOM")
-
 MESH_HOST = os.environ.get("MESH_HOST")
 MESH_PORT = int(os.environ.get("MESH_PORT"))
-
-# Kanal per NAME (ohne führendes #), Index wird automatisch ermittelt
 MESH_CHANNEL_NAME = os.environ.get("MESH_CHANNEL_NAME")
 MAX_CHANNELS = 16
 # ==============
 
 
 async def find_channel_idx(mc, name: str):
-    """Sucht den Kanal-Index anhand des Namens. Gibt None zurück, wenn nicht gefunden."""
+    """Sucht den Kanal-Index anhand des Namens."""
     target = name.lstrip("#").strip().lower()
     for idx in range(MAX_CHANNELS):
         res = await mc.commands.get_channel(idx)
@@ -31,9 +34,7 @@ async def find_channel_idx(mc, name: str):
             continue
         ch_name = ""
         if isinstance(info, dict):
-            ch_name = (info.get("channel_name")
-                       or info.get("name")
-                       or "")
+            ch_name = info.get("channel_name") or info.get("name") or ""
         ch_name = str(ch_name).lstrip("#").strip().lower()
         if ch_name == target:
             print(f"✅ Kanal '{name}' gefunden bei Index {idx}")
@@ -64,27 +65,70 @@ async def main():
         mc = await MeshCore.create_tcp(MESH_HOST, MESH_PORT)
         print("✅ MeshCore verbunden")
 
-        # --- Kanal-Index by Name ---
+        # --- Kanal-Index per Name ---
         channel_idx = await find_channel_idx(mc, MESH_CHANNEL_NAME)
         if channel_idx is None:
-            print(f"❌ Kanal '{MESH_CHANNEL_NAME}' nicht gefunden. "
-                  f"Ist der Companion dem Kanal beigetreten?")
+            print(f"❌ Kanal '{MESH_CHANNEL_NAME}' nicht gefunden.")
             return
 
         # === RICHTUNG 1: MeshCore -> Matrix ===
         async def on_channel_msg(event):
             p = event.payload
-            ch = p.get("channel_idx", p.get("channel"))
+            ch = p.get("channel_idx")
             if ch != channel_idx:
-                return  # nur den Ziel-Kanal bridgen
-            text = p.get("text", "")
-            print(f"[Mesh -> Matrix] ({ch}): {text}")
-            await matrix.room_send(
+                return
+            raw = p.get("text", "")
+            if ": " in raw:
+                sender, msg = raw.split(": ", 1)
+            else:
+                sender, msg = "?", raw
+
+            sender_e = html_lib.escape(sender)
+            msg_e = html_lib.escape(msg)
+            plain = f"[{sender}] {msg}"
+            html_body = (f'<font color="#1a73e8"><b>[{sender_e}]</b></font> '
+                         f'{msg_e}')
+
+            print(f"[Mesh -> Matrix] ({ch}): {raw}")
+            resp = await matrix.room_send(
                 room_id=room_id,
                 message_type="m.room.message",
-                content={"msgtype": "m.text", "body": f"[Meshcore] {text}"},
+                content={
+                    "msgtype": "m.text",
+                    "body": plain,
+                    "format": "org.matrix.custom.html",
+                    "formatted_body": html_body,
+                },
             )
+            if hasattr(resp, "event_id"):
+                sent_messages[resp.event_id] = sender
+                if len(sent_messages) > 500:
+                    sent_messages.pop(next(iter(sent_messages)))
 
+        # --- Reply-Parsing ---
+        async def parse_matrix_message(ev):
+            content = ev.source.get("content", {})
+            body = content.get("body", "")
+            rel = content.get("m.relates_to", {})
+            reply_to = rel.get("m.in_reply_to", {}).get("event_id")
+
+            if not reply_to:
+                return body
+
+            mesh_name = sent_messages.get(reply_to)
+            if not mesh_name:
+                orig = await matrix.room_get_event(room_id, reply_to)
+                if hasattr(orig, "event") and orig.event:
+                    orig_body = orig.event.source.get("content", {}).get("body", "")
+                    m = re.search(r"\[([^\]]+)\]", orig_body)
+                    if m:
+                        mesh_name = m.group(1)
+
+            if mesh_name:
+                return f"@[{mesh_name}] {body}"
+            return body
+
+        # --- Events registrieren ---
         mc.subscribe(EventType.CHANNEL_MSG_RECV, on_channel_msg)
         await mc.start_auto_message_fetching()
         print("✅ MeshCore Auto-Fetch aktiv")
@@ -101,7 +145,8 @@ async def main():
                     continue
                 for ev in room.timeline.events:
                     if isinstance(ev, RoomMessageText) and ev.sender != matrix.user_id:
-                        out = f"{ev.body}"[:134]  # LoRa ist kurz
+                        text = await parse_matrix_message(ev)
+                        out = f"{text}"[:134]
                         print(f"[Matrix -> Mesh]: {out}")
                         await mc.commands.send_chan_msg(channel_idx, out)
 
