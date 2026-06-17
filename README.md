@@ -3,6 +3,12 @@
 
 _works on my machine._
 
+# Capabilities:
+
+- Message from Matrix room to Meshcore channel
+- Message from Meshcore Channel to Matrix room
+- ReplyTo Message in Matrix uses the @[MeshCore-User] reply in MeshCore
+
 ### Setup (Docker Compose)
 
 ```yml
