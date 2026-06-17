@@ -12,7 +12,7 @@ MATRIX_BOT_USER   = os.environ["MATRIX_BOT_USER"]
 MATRIX_PASSWORD   = os.environ["MATRIX_PASSWORD"]
 MATRIX_ROOM_ALIAS = os.environ.get("MATRIX_ROOM")
 
-MESH_HOST = os.environ.get("MESH_HOST"")
+MESH_HOST = os.environ.get("MESH_HOST")
 MESH_PORT = int(os.environ.get("MESH_PORT"))
 
 # Kanal per NAME (ohne führendes #), Index wird automatisch ermittelt
